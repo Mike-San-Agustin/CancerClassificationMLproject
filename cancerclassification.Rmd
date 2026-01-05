@@ -1,0 +1,448 @@
+---
+title: "Cancer-Classification"
+author: "Michael San Agustin"
+date: "2025-10-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(vroom)
+library(ggplot2)
+library(readr)
+library(corrplot)
+library(skimr)
+library(purrr)
+library(GGally)
+library(missForest)
+library(tidymodels)
+library(dials)
+tidymodels_prefer()
+```
+
+## 
+
+```{r cars}
+#Variable Names
+names <- c(
+      "ID",
+      "Diagnosis",
+      "MeanRadius",
+      "MeanTexture",
+      "MeanPerimeter",
+      "MeanArea",
+      "MeanSmoothness",
+      "MeanCompcatness",
+      "MeanConcavity",
+      "MeanConcavePoints",
+      "MeanSymmetry",
+      "MeanFractalDimension",
+      "SERadius",
+      "SETexture",
+      "SEPerimeter",
+      "SEArea",
+      "SESmoothness",
+      "SECompcatness",
+      "SEConcavity",
+      "SEConcavePoints",
+      "SESymmetry",
+      "SEFractalDimension",
+      "WorstRadius",
+      "WorstTexture",
+      "WorstPerimeter",
+      "WorstArea",
+      "WorstSmoothness",
+      "WorstCompcatness",
+      "WorstConcavity",
+      "WorstConcavePoints",
+      "WorstSymmetry",
+      "WorstFractalDimension"
+    )
+
+#Data from ML repository
+cell_deformity <- vroom("wdbc.data", show_col_types = FALSE, col_names = FALSE) |>
+  setNames(names)
+
+```
+
+## 1. Introduction
+
+The data was sources from the Diagnostic Wisconsin Breast Cancer Database. It is a data set of 569 observations of 30 predictor variables, a patient ID, and a diagnosis of malignant or benign tumor, which serves as the response variable. Each observation corresponds to a collection of 10 cancer cells from a particular patient's tumor. The original study was conducted to relate a breast cancer's cells deformity to its malignant or benign diagnosis. To quanitify a cancer cell's deformity, a computer scanned the images and recorded its radius, perimeter, concavity, etc. Ten such variables were recorded per patient. Then the average, standard error and worst (or greatest) was recorded from the 10 cells taken. 
+
+## 2. EDA
+
+This section is structured as follows:
+
+1. Data Quality and missingness checks
+2. Histograms of all 30 variables
+3. Response vs predictor boxplots
+4. Correlation heatmap and PCA
+
+###2.1  Data Quality 
+
+The data set is complete and requires no imputation. Also, it fails the Hanze-Zirkler multivariate normal test. Each Variable also fails the Anderson-Darling Univariate Test for Normality. This implies that for linear regression or MANOVA to be effective, the skew in the data must be adjusted by Yeo-Johnson's algorithm or the Box-Cox algorithm. 
+
+```{r skim, echo=FALSE}
+head(cell_deformity)
+
+skim(cell_deformity) |> 
+  select('skim_variable' , n_missing, complete_rate)
+
+MVN::mvn(
+  cell_deformity |>
+    select(-ID, -Diagnosis)
+  ) |>
+  bind_cols() |> 
+  select(Variable, Normality, MVN, Skew, Kurtosis) |>
+  rename('Multivariate_Normality' = MVN) |>
+  suppressMessages() |>
+  select(Variable, Normality, Multivariate_Normality, everything())
+```
+###2.3 Response vs predictor boxplots
+
+After examining a box plot of each variable, grouped by diagnosis, clearly, malignant tumors tend to have higher values in predictor variables. Sometimes the difference is small but in many instances, the box is noticeably higher. This supports the hypothesis that malignant tumors have higher values in the predictor variables. Also, the box plots highlights the skew identified previously by marking these outlier points.
+
+```{r boxplot, echo=FALSE}
+plot <-
+     cell_deformity |>
+      pivot_longer(cols = 3:32, names_to =  "varname", values_to = "value")|>
+      ggplot(aes(x = Diagnosis, y = value, fill = Diagnosis)) +
+      ggbeeswarm::geom_beeswarm(size = 2.5) + 
+      geom_boxplot()+
+      theme_minimal() +
+      facet_wrap(~ varname, scales = "free_y")
+plot
+```
+###2.4 Correlation heatmap and PCA
+
+The correlation heatmap reveals that there are many predictor variables that are highly correlated with each other. For example, for the variables Area, Perimeter, and Radius, their means and worst values are highly correlated with each other, near 1.0. These variables are also correlated signfiicantly with their standard error, and concavity variables. This suggests that while the dataset is in 30 dimensions, the actual structure is much simpler and much of the variance will be retained in Principal Component Analysis. 
+
+```{r corrplot, messages = FALSE, warning = FALSE, message = FALSE}
+#Correlation heatmap
+corrplot(
+  cell_deformity |> select(-ID, -Diagnosis) |> cor(),
+  method = "color",
+  t1.cex = 0.1,
+  tl.srt = 45,
+  tl.col = "black",
+  order = "hclust",
+  type = "upper",
+  mar = c(0, 0, 1, 0),
+  addCoef.col = NULL
+  )
+```
+We can compute the amount of variance perserved cumulatively by examining the eigenvalues of the covariance matrix. The proportion of variance explained by a particular components is the proportion the corresponding eigenvalue is to the total sum of the eigenvalues. The first eigenvalue is 0.982, so 98.2% of the variance is explained by the first principal component. The first 3 Principal components explain over 99.9% of the data's variance. Thus, we can examine most of the the structure of the dataset in just these three dimensions. Also, since these the first three principal components retain almost all of the variance, machine learning techniques like knn and linear regression would benefit from utilizing this latent space. It will reduce the dimensions considerably which will reduce the overall variance in models and lower computational load significantly. 
+```{r tot-var-explained }
+sdev <- prcomp(cell_deformity|> select(-ID, -Diagnosis)) |> pluck("sdev") 
+
+tot_var <- sdev^2/sum(sdev^2)
+tot_var
+```
+In the reduced principal component space, we see that there is a clustering between malignant and benign tumors. The majority of the benign tumors have positive scores on the first principal component. The 
+```{r pca-plot, messages = FALSE, warning = FALSE, message = FALSE}
+scores <- 
+  prcomp(cell_deformity|> select(-ID, -Diagnosis)) |> 
+  pluck("x") |>
+  as.data.frame() |>
+  select(PC1, PC2, PC3) |>
+  cbind(cell_deformity|> select(ID, Diagnosis))
+
+scores |>
+  plotly::plot_ly(
+    x = ~PC1, 
+    y = ~PC2,
+    z = ~PC3,
+    type = "scatter3d",
+    mode = "markers",
+    text = ~ID, 
+    color = ~Diagnosis,
+    colorscale = "Viridis"
+)
+```
+
+This is a classification problem. Due to the high dimensionality of the problem, we can consider principal component analysis and kernel principal component analysis. Another strategy for dimensionality reduction, would be to use lasso regularized logistic regression in order to find a subset of variables or principal components. Using 10-fold cross-validation we can optimize the parameters and regularization constants, and we can repeat twice for reproducibility. Each fold evaluates the performance of parameters across a grid of 50 parameter combinations. Thus, each model and preprocessing combination is being evaluated 1000 times and we can choose which model based on its performance metrics. Also, 
+
+```{r screen_models-split}
+set.seed(8143)
+
+data_split <- cell_deformity |> initial_split()
+data_train <- training(data_split)
+data_test <- testing(data_split)
+
+data_folds <- data_train |> vfold_cv(repeats = 2)
+```
+
+```{r screen_models-preprocessing}
+#minimal preprocessing for RF and XG
+raw_recipe <- 
+  recipe(Diagnosis~., data = data_train |> select(-ID)) |> 
+  step_dummy(all_nominal_predictors()) |>
+  step_zv(all_predictors())
+
+#Yeo johnson and normalizing for linear model
+standard_rec <- 
+  recipe(Diagnosis~., data = data_train |> select(-ID)) |> 
+  step_YeoJohnson(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_zv(all_predictors()) |>
+  step_normalize(all_numeric_predictors()) 
+
+#PCA and kPCA recipes
+pca_rec <- 
+  standard_rec |>
+  step_pca(num_comp = tune())
+
+kpca_rec <- 
+  standard_rec |>
+  step_kpca(num_comp = tune())
+```
+
+```{r screen_models-spec}
+#log reg using glmnet package
+log_reg_spec <- 
+  logistic_reg(
+    penalty = tune(), 
+    mixture = tune()
+  ) |> 
+  set_engine("glmnet") |> 
+  set_mode("classification")
+
+#gradient boosting using the xgboost package
+xgb_spec <- 
+  boost_tree(
+    tree_depth = tune(), 
+    learn_rate = tune(), 
+    loss_reduction = tune(),
+    min_n = tune(), 
+    sample_size = tune(), 
+    trees = tune(),
+    mtry = tune()
+  ) |>
+  set_engine("xgboost") |>
+  set_mode("classification")
+
+#random Forest using the ranger package
+rf_spec <- 
+  rand_forest(
+    mtry = tune(),
+    min_n = tune(),
+    trees = tune()
+  ) |>
+  set_engine("ranger") |>
+  set_mode("classification")
+```
+
+```{r screen_models-recipes, cache = TRUE}
+
+#raw preprocessing workflow set
+raw <- 
+  workflow_set(
+    preproc = 
+      list(
+        raw = raw_recipe
+      ),
+    models =
+      list(
+        rf = rf_spec,
+        xgb = xgb_spec,
+        lm = log_reg_spec
+
+      )
+  )
+
+#standardized preprocessing workflow set
+stand <- 
+  workflow_set(
+    preproc = 
+      list(
+        stand = standard_rec,
+        pca = pca_rec,
+        kpca = kpca_rec
+      ),
+    model = 
+      list(
+        lm = log_reg_spec
+      )
+  )
+
+
+
+full_workflow <- 
+  bind_rows(raw,stand) 
+ 
+#parallel grid tuning for initial results
+grid_ctrl <-
+   control_grid(
+      save_pred = TRUE,
+      parallel_over = "everything",
+      save_workflow = TRUE, 
+      #verbose = FALSE
+      verbose = FALSE
+   )
+
+full_results <- 
+  full_workflow |>
+    workflow_map(
+        seed = 8143,
+        resamples = data_folds,
+        grid = 50,
+        control = grid_ctrl
+     )
+```
+
+```{r model-metrics}
+collect_metrics(full_results) |> arrange(desc(mean))
+
+model_metrics <- function(...){
+  x <- 
+    collect_metrics(full_results) |>
+    filter(model == ...) |>
+    arrange(desc(mean)) |>
+    head(n = 5) |>
+    summarize(tot_mean = mean(mean))
+  return(x)
+}
+
+model_metrics("logistic_reg")
+model_metrics("rand_forest")
+model_metrics("boost_tree")
+
+#collect_metrics(full_results) |> filter(model == "logistic_reg") |> arrange(desc(mean)) |> head(n = 5) |>summarize(tot_mean = mean(mean))
+#collect_metrics(full_results) |> filter(model == "rand_forest") |> arrange(desc(mean)) |> head(n = 5) |> summarize(tot_mean = mean(mean))
+#collect_metrics(full_results) |> filter(model == "boost_tree") |> arrange(desc(mean)) |> head(n = 5) |> summarize(tot_mean = mean(mean))
+```
+
+The top 5 performing models with the highest training metrics were averaged and are shown above. The logistic regression model performed the best during the grid screening. Furthermore, logistic regression on principal components out performed logistic regression on standardized and non-processed data.
+
+```{r model-metrics-graph}
+autoplot(
+    full_results,
+    rank_metric = "roc_auc",
+    metric = "roc_auc",
+    select_best = TRUE
+  ) 
+
+autoplot(
+    full_results,
+    rank_metric = "accuracy",
+    metric = "accuracy",
+    select_best = TRUE
+  ) 
+```
+
+```{r test-metrics}
+#configuration of best pca logistic regression
+best_results <-
+  full_results |>
+  extract_workflow_set_result("pca_lm") |>
+  select_best(metric = "roc_auc")
+
+best_results
+
+#test metrics of best pca logistic regression
+log_reg_test_results <- 
+   full_results |>
+   extract_workflow("stand_lm") |> 
+   finalize_workflow(best_results) |>
+   last_fit(split = data_split)
+
+collect_metrics(log_reg_test_results)
+```
+```{r}
+results_df <- 
+  full_results |> 
+  pluck("result") |> 
+  bind_rows() |>
+  pluck(".metrics") |>
+  bind_rows() |>
+  bind_cols(
+    c(
+      rep("raw_rf", 3000),
+      rep("raw_xgb", 3000),
+      rep("raw_lm", 3000),
+      rep("stand_lm", 3000),
+      rep("pca_lm", 3000),
+      rep("kpca_lm", 3000)
+      )
+    ) |>
+  select(...14, everything()) |>
+  rename(wflow_id = ...14)
+
+results_df |>
+  filter(.metric == "accuracy") |>
+  arrange(desc(.estimate)) |>
+  bind_cols(seq(1:6000)) |>
+  rename(workflow_rank = ...15) |>
+  ggplot(aes(x = workflow_rank, y = .estimate, color = wflow_id)) +
+  geom_point(size = 1.0)
+```
+The model with the best roc_auc metric was chosen and then its metric was recalculated using the test split. This elastic net model is almost pure lasso with a ratio of 0.9224 and has a low penalty coeffecient of 0.01456. Overall, test accuracy is 0.9860 and test roc_auc is 0.9912, which is in line with the training metrics.
+
+```{r bayesian-tuning, cache = TRUE}
+#Same spec as before, recoded for clarity
+log_reg_spec <- 
+  logistic_reg(
+    penalty = tune(), 
+    mixture = tune()
+  ) |> 
+  set_engine("glmnet") |> 
+  set_mode("classification")
+
+#Workflow
+log_reg_wflow <-
+  workflow() |>
+  add_recipe(pca_rec) |>
+  add_model(log_reg_spec)
+
+#Parameter ranges to iterate through
+elastic_grid <- 
+  parameters(
+    penalty(range = c(-3, 0), trans = log10_trans()),
+    mixture(range = c(0,1)),
+    num_comp(range = c(1,5))
+  )
+
+#Stop tuning if there is no improvement after 25 iterations
+ctrl <- control_bayes(verbose = TRUE, no_improve = 25)
+
+#Seed for reproducibility
+set.seed(8143)
+
+#Bayesian tuning on logistic regression model
+tuned_lm_results <- 
+  log_reg_wflow |>
+    tune_bayes(
+      resamples = data_folds,
+      metrics = metric_set(roc_auc, accuracy),
+      initial = 10,
+      iter = 300,
+      control = ctrl,
+      param_info = elastic_grid
+    )
+  
+```
+
+
+```{r test-metrics}
+#training metrics
+tuned_lm_results |>
+  collect_metrics() |>
+  arrange(desc(mean))
+
+#configuration of best pca logistic regression
+best_results <-
+  tuned_lm_results |>
+  select_best(metric = "accuracy")
+
+best_results
+
+#test metrics of best pca logistic regression
+final_lm <- 
+  log_reg_wflow |> 
+  finalize_workflow(best_results) |>
+  last_fit(
+  split = data_split
+  )
+
+collect_metrics(final_lm)
+```

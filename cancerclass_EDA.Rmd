@@ -1,0 +1,81 @@
+---
+title: "Cancer Classification - EDA"
+author: "Michael San Agustin"
+date: "2025-12-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(vroom)
+library(ggplot2)
+library(readr)
+library(corrplot)
+library(skimr)
+library(purrr)
+library(GGally)
+library(missForest)
+library(tidymodels)
+library(dials)
+tidymodels_prefer()
+```
+
+
+```{r skim, echo=FALSE}
+head(cell_deformity)
+
+skim(cell_deformity) |> 
+  select('skim_variable' , n_missing, complete_rate)
+
+MVN::mvn(
+  cell_deformity |>
+    select(-ID, -Diagnosis)
+  ) |>
+  bind_cols() |> 
+  select(Variable, Normality, MVN, Skew, Kurtosis) |>
+  rename('Multivariate_Normality' = MVN) |>
+  suppressMessages() |>
+  select(Variable, Normality, Multivariate_Normality, everything())
+```
+
+
+
+```{r boxplot, echo=FALSE}
+plot <-
+     cell_deformity |>
+      pivot_longer(cols = 3:32, names_to =  "varname", values_to = "value")|>
+      ggplot(aes(x = Diagnosis, y = value, fill = Diagnosis)) +
+      ggbeeswarm::geom_beeswarm(size = 2.5) + 
+      geom_boxplot()+
+      theme_minimal() +
+      facet_wrap(~ varname, scales = "free_y")
+plot
+```
+
+```{r tot-var-explained }
+sdev <- prcomp(cell_deformity|> select(-ID, -Diagnosis)) |> pluck("sdev") 
+
+tot_var <- sdev^2/sum(sdev^2)
+tot_var
+```
+
+```{r pca-plot, messages = FALSE, warning = FALSE, message = FALSE}
+scores <- 
+  prcomp(cell_deformity|> select(-ID, -Diagnosis)) |> 
+  pluck("x") |>
+  as.data.frame() |>
+  select(PC1, PC2, PC3) |>
+  cbind(cell_deformity|> select(ID, Diagnosis))
+
+scores |>
+  plotly::plot_ly(
+    x = ~PC1, 
+    y = ~PC2,
+    z = ~PC3,
+    type = "scatter3d",
+    mode = "markers",
+    text = ~ID, 
+    color = ~Diagnosis,
+    colorscale = "Viridis"
+)
+```
